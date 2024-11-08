@@ -1,0 +1,25 @@
+# Airflow requirements
+apache-airflow
+
+# AWS-specific packages
+boto3
+botocore
+apache-airflow-providers-amazon
+
+# Dask and related packages for distributed data processing
+dask
+dask-ml
+dask[dataframe]
+dask[distributed]
+s3fs  # Needed for reading/writing S3 files with Dask
+
+# Redshift connector for database connection
+redshift_connector
+
+# XGBoost and other machine learning packages
+xgboost
+scikit-learn
+joblib
+
+# Additional utilities
+pandas
