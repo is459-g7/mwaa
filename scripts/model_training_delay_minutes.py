@@ -135,15 +135,6 @@ def main():
     REDSHIFT_USER = os.getenv("REDSHIFT_USER")
     REDSHIFT_PASSWORD = os.getenv("REDSHIFT_PASSWORD")
     IAM_ROLE_ARN = os.getenv("IAM_ROLE_ARN")
-
-    # Debugging: Print environment variables to ensure they are loaded
-    print("REDSHIFT_HOST:", REDSHIFT_HOST)
-    print("REDSHIFT_DB:", REDSHIFT_DB)
-    print("REDSHIFT_PORT:", REDSHIFT_PORT)
-    print("REDSHIFT_USER:", REDSHIFT_USER)
-    print("REDSHIFT_PASSWORD:", REDSHIFT_PASSWORD)
-    print("S3_BUCKET:", S3_BUCKET)
-    print("IAM_ROLE_ARN:", IAM_ROLE_ARN)
     
     # Step 2: Connect to Redshift and execute SQL
     conn = connect_to_redshift()

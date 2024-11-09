@@ -55,7 +55,7 @@ def get_env_var(env_key, context):
     env_vars = context['ti'].xcom_pull(task_ids='load_env_vars_to_xcom', key='env_vars')
     return env_vars.get(env_key, '')
 
-data_processing_task = EcsRunTaskOperator(
+model_training_delay_minutes_task = EcsRunTaskOperator(
     task_id="model_training_delay_minutes_task",
     dag=dag,
     aws_conn_id="aws_default",
@@ -91,5 +91,41 @@ data_processing_task = EcsRunTaskOperator(
     },
 )
 
+model_training_delay_type_task = EcsRunTaskOperator(
+    task_id="model_training_delay_type_task",
+    dag=dag,
+    aws_conn_id="aws_default",
+    cluster=ecs_cluster,
+    task_definition=ecs_task_definition,
+    launch_type="FARGATE",
+    overrides={
+        "containerOverrides": [
+            {
+                "name": "model_training_delay_type_container",
+                'environmentFiles': [
+                    {
+                        'value': 'arn:aws:s3:::airline-is459/.env',
+                        'type': 's3'
+                    },
+                ]
+            }
+        ],
+    },
+    network_configuration={
+        "awsvpcConfiguration": {
+            "subnets": [
+                "subnet-061cd1991cf8a4a15",  # us-east-1e
+                "subnet-0955541dc44ab7686",  # us-east-1a
+                "subnet-0e795b80c4cdf155e",  # us-east-1f
+                "subnet-0f3b93e22bd4b6eca",  # us-east-1d
+                "subnet-04cb35894ea725c45",  # us-east-1b
+                "subnet-075a0ba9e4c506bb7",  # us-east-1c
+            ],
+            "securityGroups": [security_group_id],
+            "assignPublicIp": "ENABLED",
+        }
+    },
+)
+
 # Task dependencies
-load_env_task >> data_processing_task
+load_env_task >> [model_training_delay_minutes_task, model_training_delay_type_task]
