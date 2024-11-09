@@ -11,7 +11,7 @@ dask
 dask-ml
 dask[dataframe]
 dask[distributed]
-s3fs  # Needed for reading/writing S3 files with Dask
+s3fs
 
 # Redshift connector for database connection
 redshift_connector
@@ -24,3 +24,4 @@ joblib
 # Additional utilities
 pandas
 python-dotenv
+pyarrow==18.0.0

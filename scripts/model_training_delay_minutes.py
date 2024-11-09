@@ -51,7 +51,21 @@ def unload_to_s3(conn, table_name, s3_path):
 
 # Data preprocessing with Dask
 def load_and_prepare_data(s3_path):
-    ddf = dd.read_parquet(s3_path, engine='pyarrow', storage_options={'anon': False})
+    local_dir = "/tmp/data"
+    os.makedirs(local_dir, exist_ok=True)
+    s3_client = boto3.client("s3")
+    bucket = s3_path.split('/')[2]
+    prefix = '/'.join(s3_path.split('/')[3:])
+    
+    # List and download files
+    objects = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+    for obj in objects.get('Contents', []):
+        file_key = obj['Key']
+        file_name = os.path.join(local_dir, file_key.split('/')[-1])
+        s3_client.download_file(bucket, file_key, file_name)
+    
+    # Load data from local files
+    ddf = dd.read_parquet(local_dir, engine='pyarrow')
     return ddf.dropna()
 
 # Model training and uploading to S3
