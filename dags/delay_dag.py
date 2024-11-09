@@ -10,7 +10,7 @@ ENV_FILE_PATH = ".env"
 
 # DAG configuration
 dag = DAG(
-    dag_id="model_training_delay_minutes",
+    dag_id="model_training_delay",
     default_args={
         "owner": "airflow",
         "retries": 1,
