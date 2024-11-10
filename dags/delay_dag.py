@@ -46,7 +46,8 @@ load_env_task = PythonOperator(
 
 # ECS task definition and cluster details
 ecs_cluster = "is459_cluster"
-ecs_task_definition = "model_training_delay_minutes"
+ecs_task_definition_minutes = "model_training_delay_minutes"
+ecs_task_definition_type = "model_training_delay_type"
 security_group_id = "sg-0c960a1469146ca66"
 
 # ECSOperator to execute the Python script, pulling env vars from XCom
@@ -60,7 +61,7 @@ model_training_delay_minutes_task = EcsRunTaskOperator(
     dag=dag,
     aws_conn_id="aws_default",
     cluster=ecs_cluster,
-    task_definition=ecs_task_definition,
+    task_definition=ecs_task_definition_minutes,
     launch_type="FARGATE",
     overrides={
         "containerOverrides": [
@@ -96,7 +97,7 @@ model_training_delay_type_task = EcsRunTaskOperator(
     dag=dag,
     aws_conn_id="aws_default",
     cluster=ecs_cluster,
-    task_definition=ecs_task_definition,
+    task_definition=ecs_task_definition_type,
     launch_type="FARGATE",
     overrides={
         "containerOverrides": [
