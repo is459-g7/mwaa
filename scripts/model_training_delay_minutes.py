@@ -190,8 +190,6 @@ def main():
         SELECT
             FLOOR(f.crsdeptime / 100)::INT AS departure_hour,
             FLOOR(f.crsarrtime / 100)::INT AS arrival_hour,
-            (f.deptime - f.crsdeptime)::FLOAT AS scheduled_dep_diff,
-            (f.arrtime - f.crsarrtime)::FLOAT AS scheduled_arr_diff,
             CASE WHEN f.month IN (6, 7, 8, 12) THEN 1 ELSE 0 END AS is_peak_season,
             CASE WHEN f.dayofweek IN (6, 7) THEN 1 ELSE 0 END AS is_weekend,
             (f.origin_temperature_2m - f.dest_temperature_2m)::FLOAT AS temp_diff,
@@ -228,7 +226,6 @@ def main():
         CROSS JOIN total_count t
     )
     SELECT
-        ROW_NUMBER() OVER () AS id,
         *
     FROM feature_engineered;
     """
