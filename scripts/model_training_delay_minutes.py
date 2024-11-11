@@ -259,7 +259,6 @@ def main():
     y = ddf['depdelay'] + ddf['arrdelay']
     X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42, shuffle=True)
     X_valid, X_test, y_valid, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42, shuffle=True)
-    X_test, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=True)
     evaluate_model(client, booster, X_test, y_test)
     client.close()
 
