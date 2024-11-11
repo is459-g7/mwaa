@@ -72,78 +72,45 @@ def load_and_prepare_data(s3_path):
 def train_and_upload_model(ddf, s3_client, bucket, model_path, existing_booster=None):
     client = Client(n_workers=4)
     X = ddf.drop(columns=['depdelay', 'arrdelay'])
-
-    # Add log transformations for selected features
-    X['distance_x_departure_hour'] = X['distance'] * X['departure_hour']
-    X['uniquecarrier_freq_x_distance'] = X['uniquecarrier_freq'] * X['distance']
-    X['log_distance'] = np.log1p(X['distance'])
-    X['log_uniquecarrier_freq'] = np.log1p(X['uniquecarrier_freq'])
-
-    # Categorical Weather Indicator: Severe Weather
-    X['severe_weather'] = ((X['origin_precipitation'] > 0.5) | (X['origin_wind_speed_10m'] > 20)).astype(int)
-
-    print(X.columns)
-
-    # Define target
     y = ddf['depdelay'] + ddf['arrdelay']
-
-    # Split data into training, validation, and test sets
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        X, y, test_size=0.3, random_state=42, shuffle=True
-    )
-    X_valid, X_test, y_valid, y_test = train_test_split(
-        X_temp, y_temp, test_size=0.5, random_state=42, shuffle=True
-    )
-
-    # Convert training and validation data to Dask DMatrix
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=True)
     dtrain = xgb.dask.DaskDMatrix(client, X_train, y_train)
-    dvalid = xgb.dask.DaskDMatrix(client, X_valid, y_valid)
-
-    # Define tuned model parameters without n_estimators, as it's controlled by num_boost_round
+    
     params = {
         'objective': 'reg:squarederror',
-        'learning_rate': 0.05,
-        'max_depth': 8,
-        'subsample': 0.85,
-        'colsample_bytree': 0.8
+        'learning_rate': 0.1,
+        'max_depth': 6,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
     }
 
-    # Train the XGBoost model with early stopping
-    output = xgb.dask.train(
-        client,
-        params,
-        dtrain,
-        num_boost_round=400,  # Increased boosting rounds
-        evals=[(dvalid, 'validation')],  # Validation set for early stopping
-        early_stopping_rounds=50  # Stops if validation score doesn't improve for 50 rounds
-    )
-    booster = output['booster']
-
+    output = xgb.dask.train(client, params, dtrain, num_boost_round=100, xgb_model=existing_booster)
+    updated_booster = output['booster']
+    
+    # Save and upload model
     model_buffer = io.BytesIO()
-    joblib.dump(booster, model_buffer)
+    joblib.dump(updated_booster, model_buffer)
     model_buffer.seek(0)
     
     s3_client.upload_fileobj(model_buffer, bucket, model_path)
     print(f"Model uploaded to s3://{bucket}/{model_path}")
     
     client.close()
-    return booster
+    return updated_booster
 
 # Model evaluation
 def evaluate_model(client, booster, X_test, y_test):
     dtest = xgb.dask.DaskDMatrix(client, X_test, y_test)
-
-    # Perform predictions
     y_pred = xgb.dask.predict(client, booster, dtest)
-
-    # Compute metrics
-    y_test_values = y_test.compute().copy()
-    y_pred_values = y_pred.compute().copy()
+    
+    y_test_values = y_test.compute()
+    y_pred_values = y_pred.compute()
     mse = mean_squared_error(y_test_values, y_pred_values)
     mae = mean_absolute_error(y_test_values, y_pred_values)
     rmse = np.sqrt(mse)
     r2 = r2_score(y_test_values, y_pred_values)
-
+    
     print("\nModel Performance on Test Data:")
     print(f"Mean Absolute Error (MAE): {mae:.2f}")
     print(f"Mean Squared Error (MSE): {mse:.2f}")
@@ -168,6 +135,15 @@ def main():
     REDSHIFT_USER = os.getenv("REDSHIFT_USER")
     REDSHIFT_PASSWORD = os.getenv("REDSHIFT_PASSWORD")
     IAM_ROLE_ARN = os.getenv("IAM_ROLE_ARN")
+
+    # Debugging: Print environment variables to ensure they are loaded
+    print("REDSHIFT_HOST:", REDSHIFT_HOST)
+    print("REDSHIFT_DB:", REDSHIFT_DB)
+    print("REDSHIFT_PORT:", REDSHIFT_PORT)
+    print("REDSHIFT_USER:", REDSHIFT_USER)
+    print("REDSHIFT_PASSWORD:", REDSHIFT_PASSWORD)
+    print("S3_BUCKET:", S3_BUCKET)
+    print("IAM_ROLE_ARN:", IAM_ROLE_ARN)
     
     # Step 2: Connect to Redshift and execute SQL
     conn = connect_to_redshift()
@@ -254,8 +230,7 @@ def main():
     client = Client(n_workers=4)
     X = ddf.drop(columns=['depdelay', 'arrdelay'])
     y = ddf['depdelay'] + ddf['arrdelay']
-    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42, shuffle=True)
-    X_valid, X_test, y_valid, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42, shuffle=True)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=True)
     evaluate_model(client, booster, X_test, y_test)
     client.close()
 
