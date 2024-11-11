@@ -1,503 +1,267 @@
 #!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
-pip install dask_ml dask[dataframe] dask[distributed] pandas redshift_connector xgboost scikit-learn s3fs joblib
-
-
-# In[19]:
-
-
+import os
+import io
+import joblib
+import boto3
+from dotenv import load_dotenv
 import redshift_connector
-# Establish the connection
-conn = redshift_connector.connect(
-    host='default-workgroup.820242926303.us-east-1.redshift-serverless.amazonaws.com',
-    database='dev',
-    port=5439,
-    user='bq2user',
-    password='Sunrise@8785'  # Replace with your actual password or use a secure method
-)
-
-# Enable autocommit
-conn.autocommit = True
-
-# Create a cursor object
-cursor = conn.cursor()
-
-# SQL query to perform feature engineering
-cursor.execute("DROP TABLE IF EXISTS bq2_data.historical_feature_engineered_data;")
-sql_query = """
-CREATE TABLE bq2_data.historical_feature_engineered_data AS
-WITH carrier_counts AS (
-    SELECT uniquecarrier, COUNT(*) AS carrier_count
-    FROM bq2_data.joined_flights_full_weather
-    GROUP BY uniquecarrier
-),
-total_count AS (
-    SELECT COUNT(*) AS total_count FROM bq2_data.joined_flights_full_weather
-),
-feature_engineered AS (
-    SELECT
-        FLOOR(f.crsdeptime / 100)::INT AS departure_hour,
-        FLOOR(f.crsarrtime / 100)::INT AS arrival_hour,
-        CASE WHEN f.month IN (6, 7, 8, 12) THEN 1 ELSE 0 END AS is_peak_season,
-        CASE WHEN f.dayofweek IN (6, 7) THEN 1 ELSE 0 END AS is_weekend,
-        (f.origin_temperature_2m - f.dest_temperature_2m)::FLOAT AS temp_diff,
-        (f.origin_relative_humidity_2m - f.dest_relative_humidity_2m)::FLOAT AS humidity_diff,
-        (f.origin_precipitation - f.dest_precipitation)::FLOAT AS precip_diff,
-        f.distance::FLOAT AS distance,
-        c.carrier_count::FLOAT / t.total_count AS uniquecarrier_freq,
-        f.depdelay,
-        f.arrdelay,
-        f.origin_temperature_2m,
-        f.origin_relative_humidity_2m,
-        f.origin_dew_point_2m,
-        f.origin_precipitation,
-        f.origin_snow_depth,
-        f.origin_pressure_msl,
-        f.origin_surface_pressure,
-        f.origin_cloud_cover,
-        f.origin_wind_speed_10m,
-        f.origin_wind_direction_10m,
-        f.origin_wind_gusts_10m,
-        f.dest_temperature_2m,
-        f.dest_relative_humidity_2m,
-        f.dest_dew_point_2m,
-        f.dest_precipitation,
-        f.dest_snow_depth,
-        f.dest_pressure_msl,
-        f.dest_surface_pressure,
-        f.dest_cloud_cover,
-        f.dest_wind_speed_10m,
-        f.dest_wind_direction_10m,
-        f.dest_wind_gusts_10m
-    FROM BQ2_data.joined_flights_full_weather f
-    JOIN carrier_counts c ON f.uniquecarrier = c.uniquecarrier
-    CROSS JOIN total_count t
-)
-SELECT
-    *
-FROM feature_engineered;
-"""
-cursor.execute(sql_query)
-print("SQL query executed successfully.")
-cursor.close()
-conn.close()
-
-
-# In[20]:
-
-
-import redshift_connector
-# Establish the connection
-conn = redshift_connector.connect(
-    host='default-workgroup.820242926303.us-east-1.redshift-serverless.amazonaws.com',
-    database='dev',
-    port=5439,
-    user='bq2user',
-    password='Sunrise@8785'  # Replace with your actual password or use a secure method
-)
-
-# Enable autocommit
-conn.autocommit = True
-
-# Create a cursor object
-cursor = conn.cursor()
-
-unload_query = """
-UNLOAD ('SELECT * FROM bq2_data.historical_feature_engineered_data')
-TO 's3://airline-is459/data-source/BQ2/historical_feature_engineered_data/'
-IAM_ROLE 'arn:aws:iam::820242926303:role/service-role/AmazonRedshift-CommandsAccessRole-20241017T010122'
-FORMAT AS PARQUET
-ALLOWOVERWRITE;
-"""
-# Execute the UNLOAD command
-cursor.execute(unload_query)
-
-# Close the cursor and connection
-cursor.close()
-conn.close()
-
-
-# In[2]:
-
-
 import dask.dataframe as dd
-
-# Read the Parquet files from S3
-ddf = dd.read_parquet('s3://airline-is459/data-source/BQ2/historical_feature_engineered_data/', storage_options={'anon': False})
-
-# Proceed with data preprocessing and model training
-ddf = ddf.dropna()
-
-
-# In[4]:
-
-
 from dask.distributed import Client
 from dask_ml.model_selection import train_test_split
 import xgboost as xgb
 import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import boto3
-import io
-import joblib
-import pandas as pd
 
+# Constants
+S3_BUCKET = "airline-is459"
+S3_MODEL_PATH = "data-source/BQ2models/xgb_total_delay_model.joblib"
+ENV_FILE_PATH = ".env"
 
-# Initialize Dask client
-client = Client(n_workers=4)
+def download_env_file_from_s3(bucket, file_path):
+    s3 = boto3.client('s3')
+    obj = s3.get_object(Bucket=bucket, Key=file_path)
+    return obj['Body'].read().decode('utf-8')
 
-# Define features and target
-X = ddf.drop(columns=['depdelay', 'arrdelay'])
+# Establish Redshift connection
+def connect_to_redshift():
+    return redshift_connector.connect(
+        host=REDSHIFT_HOST,
+        database=REDSHIFT_DB,
+        port=REDSHIFT_PORT,
+        user=REDSHIFT_USER,
+        password=REDSHIFT_PASSWORD
+    )
 
-# Add log transformations for selected features
-X['distance_x_departure_hour'] = X['distance'] * X['departure_hour']
-X['uniquecarrier_freq_x_distance'] = X['uniquecarrier_freq'] * X['distance']
-X['log_distance'] = np.log1p(X['distance'])
-X['log_uniquecarrier_freq'] = np.log1p(X['uniquecarrier_freq'])
+# Execute SQL queries
+def execute_sql_query(conn, sql_query):
+    with conn.cursor() as cursor:
+        cursor.execute(sql_query)
+        print("SQL query executed successfully.")
 
-# Categorical Weather Indicator: Severe Weather
-X['severe_weather'] = ((X['origin_precipitation'] > 0.5) | (X['origin_wind_speed_10m'] > 20)).astype(int)
+# UNLOAD query to S3
+def unload_to_s3(conn, table_name, s3_path):
+    unload_query = f"""
+    UNLOAD ('SELECT * FROM {table_name}')
+    TO '{s3_path}'
+    IAM_ROLE '{IAM_ROLE_ARN}'
+    FORMAT AS PARQUET
+    ALLOWOVERWRITE;
+    """
+    execute_sql_query(conn, unload_query)
 
-print(X.columns)
+# Data preprocessing with Dask
+def load_and_prepare_data(s3_path):
+    local_dir = "/tmp/data"
+    os.makedirs(local_dir, exist_ok=True)
+    s3_client = boto3.client("s3")
+    bucket = s3_path.split('/')[2]
+    prefix = '/'.join(s3_path.split('/')[3:])
+    
+    # List and download files
+    objects = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+    for obj in objects.get('Contents', []):
+        file_key = obj['Key']
+        file_name = os.path.join(local_dir, file_key.split('/')[-1])
+        s3_client.download_file(bucket, file_key, file_name)
+    
+    # Load data from local files
+    ddf = dd.read_parquet(local_dir, engine='pyarrow')
+    return ddf.dropna()
 
-# Define target
-y = ddf['depdelay'] + ddf['arrdelay']
+# Model training and uploading to S3
+def train_and_upload_model(ddf, s3_client, bucket, model_path, existing_booster=None):
+    client = Client(n_workers=4)
+    X = ddf.drop(columns=['depdelay', 'arrdelay'])
 
-# Split data into training, validation, and test sets
-X_train, X_temp, y_train, y_temp = train_test_split(
-    X, y, test_size=0.3, random_state=42, shuffle=True
-)
-X_valid, X_test, y_valid, y_test = train_test_split(
-    X_temp, y_temp, test_size=0.5, random_state=42, shuffle=True
-)
+    # Add log transformations for selected features
+    X['distance_x_departure_hour'] = X['distance'] * X['departure_hour']
+    X['uniquecarrier_freq_x_distance'] = X['uniquecarrier_freq'] * X['distance']
+    X['log_distance'] = np.log1p(X['distance'])
+    X['log_uniquecarrier_freq'] = np.log1p(X['uniquecarrier_freq'])
 
-# Convert training and validation data to Dask DMatrix
-dtrain = xgb.dask.DaskDMatrix(client, X_train, y_train)
-dvalid = xgb.dask.DaskDMatrix(client, X_valid, y_valid)
+    # Categorical Weather Indicator: Severe Weather
+    X['severe_weather'] = ((X['origin_precipitation'] > 0.5) | (X['origin_wind_speed_10m'] > 20)).astype(int)
 
-# Define tuned model parameters without n_estimators, as it's controlled by num_boost_round
-params = {
-    'objective': 'reg:squarederror',
-    'learning_rate': 0.05,
-    'max_depth': 8,
-    'subsample': 0.85,
-    'colsample_bytree': 0.8
-}
+    print(X.columns)
 
-# Train the XGBoost model with early stopping
-output = xgb.dask.train(
-    client,
-    params,
-    dtrain,
-    num_boost_round=400,  # Increased boosting rounds
-    evals=[(dvalid, 'validation')],  # Validation set for early stopping
-    early_stopping_rounds=50  # Stops if validation score doesn't improve for 50 rounds
-)
-booster = output['booster']
+    # Define target
+    y = ddf['depdelay'] + ddf['arrdelay']
 
-# Feature importance analysis
-importance = booster.get_score(importance_type='weight')
-importance_df = pd.DataFrame(list(importance.items()), columns=['Feature', 'Importance']).sort_values(by='Importance', ascending=False)
+    # Split data into training, validation, and test sets
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X, y, test_size=0.3, random_state=42, shuffle=True
+    )
+    X_valid, X_test, y_valid, y_test = train_test_split(
+        X_temp, y_temp, test_size=0.5, random_state=42, shuffle=True
+    )
 
-model_buffer = io.BytesIO()
-joblib.dump(booster, model_buffer)
-model_buffer.seek(0)
+    # Convert training and validation data to Dask DMatrix
+    dtrain = xgb.dask.DaskDMatrix(client, X_train, y_train)
+    dvalid = xgb.dask.DaskDMatrix(client, X_valid, y_valid)
 
-# Set up the S3 client and specify bucket and path
-s3_client = boto3.client('s3')
-s3_bucket_name = 'airline-is459'  # Replace with your S3 bucket name
-s3_model_path = 'data-source/BQ2models/xgb_total_delay_model.joblib'  # Path in the bucket
+    # Define tuned model parameters without n_estimators, as it's controlled by num_boost_round
+    params = {
+        'objective': 'reg:squarederror',
+        'learning_rate': 0.05,
+        'max_depth': 8,
+        'subsample': 0.85,
+        'colsample_bytree': 0.8
+    }
 
-# Upload buffer directly to S3
-try:
-    s3_client.upload_fileobj(model_buffer, s3_bucket_name, s3_model_path)
-    print(f"Model uploaded to s3://{s3_bucket_name}/{s3_model_path}")
-except Exception as e:
-    print(f"Failed to upload model to S3: {e}")
+    # Train the XGBoost model with early stopping
+    output = xgb.dask.train(
+        client,
+        params,
+        dtrain,
+        num_boost_round=400,  # Increased boosting rounds
+        evals=[(dvalid, 'validation')],  # Validation set for early stopping
+        early_stopping_rounds=50  # Stops if validation score doesn't improve for 50 rounds
+    )
+    booster = output['booster']
 
-# ---- Evaluation on the Test Set ----
-# Prepare test data
-dtest = xgb.dask.DaskDMatrix(client, X_test, y_test)
+    model_buffer = io.BytesIO()
+    joblib.dump(booster, model_buffer)
+    model_buffer.seek(0)
+    
+    s3_client.upload_fileobj(model_buffer, bucket, model_path)
+    print(f"Model uploaded to s3://{bucket}/{model_path}")
+    
+    client.close()
+    return booster
 
-# Perform predictions
-y_pred = xgb.dask.predict(client, booster, dtest)
+# Model evaluation
+def evaluate_model(client, booster, X_test, y_test):
+    dtest = xgb.dask.DaskDMatrix(client, X_test, y_test)
 
-# Compute metrics
-y_test_values = y_test.compute().copy()
-y_pred_values = y_pred.compute().copy()
-mse = mean_squared_error(y_test_values, y_pred_values)
-mae = mean_absolute_error(y_test_values, y_pred_values)
-rmse = np.sqrt(mse)
-r2 = r2_score(y_test_values, y_pred_values)
+    # Perform predictions
+    y_pred = xgb.dask.predict(client, booster, dtest)
 
-print("\nModel Performance on Test Data:")
-print(f"Mean Absolute Error (MAE): {mae:.2f}")
-print(f"Mean Squared Error (MSE): {mse:.2f}")
-print(f"Root Mean Squared Error (RMSE): {rmse:.2f}")
-print(f"R-squared (R²): {r2:.4f}")
+    # Compute metrics
+    y_test_values = y_test.compute().copy()
+    y_pred_values = y_pred.compute().copy()
+    mse = mean_squared_error(y_test_values, y_pred_values)
+    mae = mean_absolute_error(y_test_values, y_pred_values)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_test_values, y_pred_values)
 
-# Display feature importance
-print("\nFeature Importance:")
-print(importance_df)
+    print("\nModel Performance on Test Data:")
+    print(f"Mean Absolute Error (MAE): {mae:.2f}")
+    print(f"Mean Squared Error (MSE): {mse:.2f}")
+    print(f"Root Mean Squared Error (RMSE): {rmse:.2f}")
+    print(f"R-squared (R²): {r2:.4f}")
 
-client.close()
+# Main process
+def main():
+    s3_client = boto3.client("s3")
+    
+    # Step 1: Download and load the .env file from S3
+    env_content = download_env_file_from_s3(S3_BUCKET, ENV_FILE_PATH)
+    with open(ENV_FILE_PATH, 'w') as f:
+        f.write(env_content)
+    load_dotenv(ENV_FILE_PATH)
 
+    # Constants
+    global REDSHIFT_HOST, REDSHIFT_DB, REDSHIFT_PORT, REDSHIFT_USER, REDSHIFT_PASSWORD, IAM_ROLE_ARN
+    REDSHIFT_HOST = os.getenv("REDSHIFT_HOST")
+    REDSHIFT_DB = os.getenv("REDSHIFT_DB")
+    REDSHIFT_PORT = int(os.getenv("REDSHIFT_PORT", 5439))
+    REDSHIFT_USER = os.getenv("REDSHIFT_USER")
+    REDSHIFT_PASSWORD = os.getenv("REDSHIFT_PASSWORD")
+    IAM_ROLE_ARN = os.getenv("IAM_ROLE_ARN")
+    
+    # Step 2: Connect to Redshift and execute SQL
+    conn = connect_to_redshift()
+    drop_table_sql = """
+    DROP TABLE IF EXISTS bq2_data.historical_feature_engineered_data;
+    """
+    execute_sql_query(conn, drop_table_sql)
 
-# BELOW IS TRAINING USING LATEST DATA LOADING MODEL FROM S3 THEN SAVE BACK TO S3
-
-# BELOW IS TRAINING USING LATEST DATA LOADING MODEL FROM S3 THEN SAVE BACK TO S3
-
-# BELOW IS TRAINING USING LATEST DATA LOADING MODEL FROM S3 THEN SAVE BACK TO S3
-
-# BELOW IS TRAINING USING LATEST DATA LOADING MODEL FROM S3 THEN SAVE BACK TO S3
-
-# BELOW IS TRAINING USING LATEST DATA LOADING MODEL FROM S3 THEN SAVE BACK TO S3
-
-# In[8]:
-
-
-import redshift_connector
-# Establish the connection
-conn = redshift_connector.connect(
-    host='default-workgroup.820242926303.us-east-1.redshift-serverless.amazonaws.com',
-    database='dev',
-    port=5439,
-    user='bq2user',
-    password='Sunrise@8785'  # Replace with your actual password or use a secure method
-)
-
-# Enable autocommit
-conn.autocommit = True
-
-# Create a cursor object
-cursor = conn.cursor()
-
-# SQL query to perform feature engineering
-cursor.execute("DROP TABLE IF EXISTS bq2_data.latest_feature_engineered_data;")
-sql_query = """
-CREATE TABLE bq2_data.latest_feature_engineered_data AS
-WITH carrier_counts AS (
-    SELECT uniquecarrier, COUNT(*) AS carrier_count
-    FROM bq2_data.joined_flights_full_weather
-    GROUP BY uniquecarrier
-),
-total_count AS (
-    SELECT COUNT(*) AS total_count FROM bq2_data.latest_joined_flights_full_weather
-),
-feature_engineered AS (
+    feature_engineering_sql = """
+    CREATE TABLE bq2_data.historical_feature_engineered_data AS
+    WITH carrier_counts AS (
+        SELECT uniquecarrier, COUNT(*) AS carrier_count
+        FROM bq2_data.joined_flights_full_weather
+        GROUP BY uniquecarrier
+    ),
+    total_count AS (
+        SELECT COUNT(*) AS total_count FROM bq2_data.joined_flights_full_weather
+    ),
+    feature_engineered AS (
+        SELECT
+            FLOOR(f.crsdeptime / 100)::INT AS departure_hour,
+            FLOOR(f.crsarrtime / 100)::INT AS arrival_hour,
+            (f.deptime - f.crsdeptime)::FLOAT AS scheduled_dep_diff,
+            (f.arrtime - f.crsarrtime)::FLOAT AS scheduled_arr_diff,
+            CASE WHEN f.month IN (6, 7, 8, 12) THEN 1 ELSE 0 END AS is_peak_season,
+            CASE WHEN f.dayofweek IN (6, 7) THEN 1 ELSE 0 END AS is_weekend,
+            (f.origin_temperature_2m - f.dest_temperature_2m)::FLOAT AS temp_diff,
+            (f.origin_relative_humidity_2m - f.dest_relative_humidity_2m)::FLOAT AS humidity_diff,
+            (f.origin_precipitation - f.dest_precipitation)::FLOAT AS precip_diff,
+            f.distance::FLOAT AS distance,
+            c.carrier_count::FLOAT / t.total_count AS uniquecarrier_freq,
+            f.depdelay,
+            f.arrdelay,
+            f.origin_temperature_2m,
+            f.origin_relative_humidity_2m,
+            f.origin_dew_point_2m,
+            f.origin_precipitation,
+            f.origin_snow_depth,
+            f.origin_pressure_msl,
+            f.origin_surface_pressure,
+            f.origin_cloud_cover,
+            f.origin_wind_speed_10m,
+            f.origin_wind_direction_10m,
+            f.origin_wind_gusts_10m,
+            f.dest_temperature_2m,
+            f.dest_relative_humidity_2m,
+            f.dest_dew_point_2m,
+            f.dest_precipitation,
+            f.dest_snow_depth,
+            f.dest_pressure_msl,
+            f.dest_surface_pressure,
+            f.dest_cloud_cover,
+            f.dest_wind_speed_10m,
+            f.dest_wind_direction_10m,
+            f.dest_wind_gusts_10m
+        FROM BQ2_data.joined_flights_full_weather f
+        JOIN carrier_counts c ON f.uniquecarrier = c.uniquecarrier
+        CROSS JOIN total_count t
+    )
     SELECT
-        FLOOR(f.crsdeptime / 100)::INT AS departure_hour,
-        FLOOR(f.crsarrtime / 100)::INT AS arrival_hour,
-        CASE WHEN f.month IN (6, 7, 8, 12) THEN 1 ELSE 0 END AS is_peak_season,
-        CASE WHEN f.dayofweek IN (6, 7) THEN 1 ELSE 0 END AS is_weekend,
-        (f.origin_temperature_2m - f.dest_temperature_2m)::FLOAT AS temp_diff,
-        (f.origin_relative_humidity_2m - f.dest_relative_humidity_2m)::FLOAT AS humidity_diff,
-        (f.origin_precipitation - f.dest_precipitation)::FLOAT AS precip_diff,
-        f.distance::FLOAT AS distance,
-        c.carrier_count::FLOAT / t.total_count AS uniquecarrier_freq,
-        f.depdelay,
-        f.arrdelay,
-        f.origin_temperature_2m,
-        f.origin_relative_humidity_2m,
-        f.origin_dew_point_2m,
-        f.origin_precipitation,
-        f.origin_snow_depth,
-        f.origin_pressure_msl,
-        f.origin_surface_pressure,
-        f.origin_cloud_cover,
-        f.origin_wind_speed_10m,
-        f.origin_wind_direction_10m,
-        f.origin_wind_gusts_10m,
-        f.dest_temperature_2m,
-        f.dest_relative_humidity_2m,
-        f.dest_dew_point_2m,
-        f.dest_precipitation,
-        f.dest_snow_depth,
-        f.dest_pressure_msl,
-        f.dest_surface_pressure,
-        f.dest_cloud_cover,
-        f.dest_wind_speed_10m,
-        f.dest_wind_direction_10m,
-        f.dest_wind_gusts_10m
-    FROM BQ2_data.latest_joined_flights_full_weather f
-    JOIN carrier_counts c ON f.uniquecarrier = c.uniquecarrier
-    CROSS JOIN total_count t
-)
-SELECT
-    ROW_NUMBER() OVER () AS id,
-    *
-FROM feature_engineered;
-"""
-cursor.execute(sql_query)
-print("SQL query executed successfully.")
-cursor.close()
-conn.close()
+        ROW_NUMBER() OVER () AS id,
+        *
+    FROM feature_engineered;
+    """
+    execute_sql_query(conn, feature_engineering_sql)
+    unload_to_s3(conn, "bq2_data.historical_feature_engineered_data", f"s3://{S3_BUCKET}/data-source/BQ2/historical_feature_engineered_data/")
+    conn.close()
+    
+    # Step 3: Load data from S3 and preprocess
+    ddf = load_and_prepare_data(f"s3://{S3_BUCKET}/data-source/BQ2/historical_feature_engineered_data/")
+    
+    # Step 4: Check if model exists in S3
+    model_buffer = io.BytesIO()
+    existing_booster = None
+    try:
+        s3_client.download_fileobj(S3_BUCKET, S3_MODEL_PATH, model_buffer)
+        model_buffer.seek(0)
+        existing_booster = joblib.load(model_buffer)
+        print("Existing model loaded from S3.")
+    except Exception as e:
+        print(f"Failed to load model from S3: {e}. Proceeding with new training.")
+    
+    # Step 5: Train model and upload
+    booster = train_and_upload_model(ddf, s3_client, S3_BUCKET, S3_MODEL_PATH, existing_booster)
+    
+    # Step 6: Evaluate model
+    client = Client(n_workers=4)
+    X = ddf.drop(columns=['depdelay', 'arrdelay'])
+    y = ddf['depdelay'] + ddf['arrdelay']
+    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42, shuffle=True)
+    X_valid, X_test, y_valid, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42, shuffle=True)
+    X_test, y_test = train_test_split(X, y, test_size=0.2, random_state=42, shuffle=True)
+    evaluate_model(client, booster, X_test, y_test)
+    client.close()
 
-
-# In[10]:
-
-
-import redshift_connector
-# Establish the connection
-conn = redshift_connector.connect(
-    host='default-workgroup.820242926303.us-east-1.redshift-serverless.amazonaws.com',
-    database='dev',
-    port=5439,
-    user='bq2user',
-    password='Sunrise@8785'  # Replace with your actual password or use a secure method
-)
-
-# Enable autocommit
-conn.autocommit = True
-
-# Create a cursor object
-cursor = conn.cursor()
-
-unload_query = """
-UNLOAD ('SELECT * FROM bq2_data.latest_feature_engineered_data')
-TO 's3://airline-is459/data-source/BQ2/latest_feature_engineered_data/'
-IAM_ROLE 'arn:aws:iam::820242926303:role/service-role/AmazonRedshift-CommandsAccessRole-20241017T010122'
-FORMAT AS PARQUET
-ALLOWOVERWRITE;
-"""
-# Execute the UNLOAD command
-cursor.execute(unload_query)
-
-# Close the cursor and connection
-cursor.close()
-conn.close()
-
-
-# In[11]:
-
-
-import dask.dataframe as dd
-
-# Read the Parquet files from S3
-ddf = dd.read_parquet('s3://airline-is459/data-source/BQ2/latest_feature_engineered_data/', storage_options={'anon': False})
-
-# Proceed with data preprocessing and model training
-ddf = ddf.dropna()
-
-
-# In[12]:
-
-
-from dask.distributed import Client
-from dask_ml.model_selection import train_test_split
-import xgboost as xgb
-import numpy as np
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import boto3
-import io
-import joblib
-
-
-# Initialize Dask client
-client = Client(n_workers=4)
-
-# Define features and target
-X = ddf.drop(columns=['depdelay', 'arrdelay'])
-
-# Add log transformations for selected features
-X['distance_x_departure_hour'] = X['distance'] * X['departure_hour']
-X['uniquecarrier_freq_x_distance'] = X['uniquecarrier_freq'] * X['distance']
-X['log_distance'] = np.log1p(X['distance'])
-X['log_uniquecarrier_freq'] = np.log1p(X['uniquecarrier_freq'])
-
-# Categorical Weather Indicator: Severe Weather
-X['severe_weather'] = ((X['origin_precipitation'] > 0.5) | (X['origin_wind_speed_10m'] > 20)).astype(int)
-
-print(X.columns)
-
-# Define target
-y = ddf['depdelay'] + ddf['arrdelay']
-
-# Split data into training, validation, and test sets
-X_train, X_temp, y_train, y_temp = train_test_split(
-    X, y, test_size=0.3, random_state=42, shuffle=True
-)
-X_valid, X_test, y_valid, y_test = train_test_split(
-    X_temp, y_temp, test_size=0.5, random_state=42, shuffle=True
-)
-
-# Convert training and validation data to Dask DMatrix
-dtrain = xgb.dask.DaskDMatrix(client, X_train, y_train)
-dvalid = xgb.dask.DaskDMatrix(client, X_valid, y_valid)
-
-# Define tuned model parameters without n_estimators, as it's controlled by num_boost_round
-params = {
-    'objective': 'reg:squarederror',
-    'learning_rate': 0.05,
-    'max_depth': 8,
-    'subsample': 0.85,
-    'colsample_bytree': 0.8
-}
-
-# Train the XGBoost model with early stopping
-output = xgb.dask.train(
-    client,
-    params,
-    dtrain,
-    num_boost_round=400,  # Increased boosting rounds
-    evals=[(dvalid, 'validation')],  # Validation set for early stopping
-    early_stopping_rounds=50  # Stops if validation score doesn't improve for 50 rounds
-)
-booster = output['booster']
-
-# Feature importance analysis
-importance = booster.get_score(importance_type='weight')
-importance_df = pd.DataFrame(list(importance.items()), columns=['Feature', 'Importance']).sort_values(by='Importance', ascending=False)
-
-model_buffer = io.BytesIO()
-joblib.dump(booster, model_buffer)
-model_buffer.seek(0)
-
-# Set up the S3 client and specify bucket and path
-s3_client = boto3.client('s3')
-s3_bucket_name = 'airline-is459'  # Replace with your S3 bucket name
-s3_model_path = 'data-source/BQ2models/xgb_total_delay_model.joblib'  # Path in the bucket
-
-# Upload buffer directly to S3
-try:
-    s3_client.upload_fileobj(model_buffer, s3_bucket_name, s3_model_path)
-    print(f"Model uploaded to s3://{s3_bucket_name}/{s3_model_path}")
-except Exception as e:
-    print(f"Failed to upload model to S3: {e}")
-
-# ---- Evaluation on the Test Set ----
-# Prepare test data
-dtest = xgb.dask.DaskDMatrix(client, X_test, y_test)
-
-# Perform predictions
-y_pred = xgb.dask.predict(client, booster, dtest)
-
-# Compute metrics
-y_test_values = y_test.compute().copy()
-y_pred_values = y_pred.compute().copy()
-mse = mean_squared_error(y_test_values, y_pred_values)
-mae = mean_absolute_error(y_test_values, y_pred_values)
-rmse = np.sqrt(mse)
-r2 = r2_score(y_test_values, y_pred_values)
-
-print("\nModel Performance on Test Data:")
-print(f"Mean Absolute Error (MAE): {mae:.2f}")
-print(f"Mean Squared Error (MSE): {mse:.2f}")
-print(f"Root Mean Squared Error (RMSE): {rmse:.2f}")
-print(f"R-squared (R²): {r2:.4f}")
-
-# Display feature importance
-print("\nFeature Importance:")
-print(importance_df)
-
-client.close()
-
-# In[ ]:
-
-
-
-
+if __name__ == "__main__":
+    main()
